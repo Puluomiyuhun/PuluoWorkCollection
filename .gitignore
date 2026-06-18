@@ -1,0 +1,17 @@
+# Unreal Engine generated files
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Build/
+
+# Visual Studio files
+.vs/
+*.sln.DotSettings.user
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# New folder (temp)
+新建文件夹/
