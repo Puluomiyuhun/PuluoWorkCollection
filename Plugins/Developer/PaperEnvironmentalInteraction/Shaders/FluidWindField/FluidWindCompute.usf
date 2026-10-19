@@ -1,0 +1,332 @@
+#include "/Engine/Public/Platform.ush"
+#include "FluidWindInclude.ush"
+
+#define THREAD_SIZE 4
+
+#if COMPUTE_OFFSET_CS == 1
+
+int3 OffsetPosition;
+int3 VolumeSizeMinusOne;
+Texture3D<float> WindBufferInputX;
+Texture3D<float> WindBufferInputY;
+Texture3D<float> WindBufferInputZ;
+RWTexture3D<float> WindBufferOutputX;
+RWTexture3D<float> WindBufferOutputY;
+RWTexture3D<float> WindBufferOutputZ;
+
+[numthreads(THREAD_SIZE, THREAD_SIZE, THREAD_SIZE)]
+void ComputeOffsetPosition(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	int x = min(max(DispatchThreadId.x + OffsetPosition.x, 0), VolumeSizeMinusOne.x);
+	int y = min(max(DispatchThreadId.y + OffsetPosition.y, 0), VolumeSizeMinusOne.y);
+	int z = min(max(DispatchThreadId.z + OffsetPosition.z, 0), VolumeSizeMinusOne.z);
+	int3 Position = int3(x, y, z);
+	WindBufferOutputX[DispatchThreadId.xyz] = WindBufferInputX[Position].r;
+	WindBufferOutputY[DispatchThreadId.xyz] = WindBufferInputY[Position].r;
+	WindBufferOutputZ[DispatchThreadId.xyz] = WindBufferInputZ[Position].r;
+}
+
+#endif
+
+#if COMPUTE_BLUR_CS == 1 || COMPUTE_DIVERGENCE_CS == 1 || COMPUTE_RECTIFY_VELOCITY_CS == 1 || COMPUTE_PRESSURE_CS == 1
+
+#define THREAD_SIZE_SQUARE 16
+
+int ComputeGroupIndex(int3 GroupThreadID)
+{
+	return GroupThreadID.x + GroupThreadID.y * THREAD_SIZE + GroupThreadID.z * THREAD_SIZE_SQUARE;
+}
+
+#define SAMPLE_LEFT_X(GroupCache, GlobalTexture, Result) \
+{ \
+	if (GroupThreadID.x != 0) \
+	{ \
+		int3 InnerID = GroupThreadID + int3(-1, 0, 0); \
+		Result = GroupCache[InnerID.x + InnerID.y * THREAD_SIZE + InnerID.z * THREAD_SIZE_SQUARE]; \
+	} \
+	else \
+	{ \
+		int InnerID = max(DispatchThreadId.x - 1, 0); \
+		Result = GlobalTexture[int3(InnerID, DispatchThreadId.y, DispatchThreadId.z)].r; \
+	} \
+}
+
+#define SAMPLE_RIGHT_X(GroupCache, GlobalTexture, Result) \
+{ \
+	if (GroupThreadID.x < THREAD_SIZE - 1) \
+	{ \
+		int3 InnerID = GroupThreadID + int3(1, 0, 0); \
+		Result = GroupCache[InnerID.x + InnerID.y * THREAD_SIZE + InnerID.z * THREAD_SIZE_SQUARE]; \
+	} \
+	else \
+	{ \
+		int InnerID = min(DispatchThreadId.x + 1, VolumeSizeMinusOne.x); \
+		Result = GlobalTexture[int3(InnerID, DispatchThreadId.y, DispatchThreadId.z)].r; \
+	} \
+}
+
+#define SAMPLE_LEFT_Y(GroupCache, GlobalTexture, Result) \
+{ \
+	if (GroupThreadID.y != 0) \
+	{ \
+		int3 InnerID = GroupThreadID + int3(0, -1, 0); \
+		Result = GroupCache[InnerID.x + InnerID.y * THREAD_SIZE + InnerID.z * THREAD_SIZE_SQUARE]; \
+	} \
+	else \
+	{ \
+		int InnerID = max(DispatchThreadId.y - 1, 0); \
+		Result = GlobalTexture[int3(DispatchThreadId.x, InnerID, DispatchThreadId.z)].r; \
+	} \
+}
+
+#define SAMPLE_RIGHT_Y(GroupCache, GlobalTexture, Result) \
+{ \
+	if (GroupThreadID.y < THREAD_SIZE - 1) \
+	{ \
+		int3 InnerID = GroupThreadID + int3(0, 1, 0); \
+		Result = GroupCache[InnerID.x + InnerID.y * THREAD_SIZE + InnerID.z * THREAD_SIZE_SQUARE]; \
+	} \
+	else \
+	{ \
+		int InnerID = min(DispatchThreadId.y + 1, VolumeSizeMinusOne.y); \
+		Result = GlobalTexture[int3(DispatchThreadId.x, InnerID, DispatchThreadId.z)].r; \
+	} \
+}
+
+#define SAMPLE_LEFT_Z(GroupCache, GlobalTexture, Result) \
+{ \
+	if (GroupThreadID.z != 0) \
+	{ \
+		int3 InnerID = GroupThreadID + int3(0, 0, -1); \
+		Result = GroupCache[InnerID.x + InnerID.y * THREAD_SIZE + InnerID.z * THREAD_SIZE_SQUARE]; \
+	} \
+	else \
+	{ \
+		int InnerID = max(DispatchThreadId.z - 1, 0); \
+		Result = GlobalTexture[int3(DispatchThreadId.x, DispatchThreadId.y, InnerID)].r; \
+	} \
+}
+
+#define SAMPLE_RIGHT_Z(GroupCache, GlobalTexture, Result) \
+{ \
+	if (GroupThreadID.z < THREAD_SIZE - 1) \
+	{ \
+		int3 InnerID = GroupThreadID + int3(0, 0, 1); \
+		Result = GroupCache[InnerID.x + InnerID.y * THREAD_SIZE + InnerID.z * THREAD_SIZE_SQUARE]; \
+	} \
+	else \
+	{ \
+		int InnerID = min(DispatchThreadId.z + 1, VolumeSizeMinusOne.z); \
+		Result = GlobalTexture[int3(DispatchThreadId.x, DispatchThreadId.y, InnerID)].r; \
+	} \
+}
+#endif
+
+#if COMPUTE_BLUR_CS == 1
+float DiffusionForce;
+int3 VolumeSizeMinusOne;
+Texture3D<float> BlurBufferInput;
+RWTexture3D<float> BlurBufferOutput;
+
+groupshared float ThreadCache[THREAD_SIZE*THREAD_SIZE*THREAD_SIZE];
+
+[numthreads(THREAD_SIZE, THREAD_SIZE, THREAD_SIZE)]
+void ComputeDiffusion(uint3 DispatchThreadId : SV_DispatchThreadID, int3 GroupThreadID : SV_GroupThreadID)
+{
+	// Store the current thread's value in shared memory
+	int GroupIndex =  ComputeGroupIndex(GroupThreadID);
+	float Value = BlurBufferInput[DispatchThreadId].r;
+	ThreadCache[GroupIndex] = Value;
+	GroupMemoryBarrierWithGroupSync();
+
+	float XRight = 0.f;
+	float XLeft =  0.f;
+	float YRight = 0.f;
+	float YLeft =  0.f;
+	float ZRight = 0.f;
+	float ZLeft =  0.f;
+	
+	{
+		// Compute X
+		SAMPLE_RIGHT_X(ThreadCache, BlurBufferInput, XRight);
+		SAMPLE_LEFT_X(ThreadCache, BlurBufferInput, XLeft);
+	
+		// Compute Y
+		SAMPLE_RIGHT_Y(ThreadCache, BlurBufferInput, YRight);
+		SAMPLE_LEFT_Y(ThreadCache, BlurBufferInput, YLeft);
+	
+		// Compute Z
+		SAMPLE_RIGHT_Z(ThreadCache, BlurBufferInput, ZRight);
+		SAMPLE_LEFT_Z(ThreadCache, BlurBufferInput, ZLeft);
+	}
+
+	float BluredData = ((XRight + XLeft + YRight + YLeft + ZRight + ZLeft) * DiffusionForce + Value) / (1 + DiffusionForce * 6);
+	BlurBufferOutput[DispatchThreadId.xyz] = BluredData;
+}
+
+#endif
+
+#if COMPUTE_DIVERGENCE_CS == 1
+float WorldSize;
+int3 VolumeSizeMinusOne;
+Texture3D<float> VelocityInputX;
+Texture3D<float> VelocityInputY;
+Texture3D<float> VelocityInputZ;
+RWTexture3D<float> DivergenceOutput;
+
+groupshared float VelocityXCache[THREAD_SIZE*THREAD_SIZE*THREAD_SIZE];
+groupshared float VelocityYCache[THREAD_SIZE*THREAD_SIZE*THREAD_SIZE];
+groupshared float VelocityZCache[THREAD_SIZE*THREAD_SIZE*THREAD_SIZE];
+
+[numthreads(THREAD_SIZE, THREAD_SIZE, THREAD_SIZE)]
+void ComputeDivergence(uint3 DispatchThreadId : SV_DispatchThreadID, int3 GroupThreadID : SV_GroupThreadID)
+{
+	int GroupIndex =  ComputeGroupIndex(GroupThreadID);
+	VelocityXCache[GroupIndex] = VelocityInputX[DispatchThreadId.xyz].r;
+	VelocityYCache[GroupIndex] = VelocityInputY[DispatchThreadId.xyz].r;
+	VelocityZCache[GroupIndex] = VelocityInputZ[DispatchThreadId.xyz].r;
+	GroupMemoryBarrierWithGroupSync();
+	
+	float Height = WorldSize;
+
+	// 1.Compute Divergence
+	
+	float VelocityXMinus = 0.f;
+	float VelocityXPlus  = 0.f;
+	float VelocityYMinus = 0.f;
+	float VelocityYPlus  = 0.f;
+	float VelocityZMinus = 0.f;
+	float VelocityZPlus  = 0.f;
+	
+	{
+		// Compute X
+		SAMPLE_RIGHT_X(VelocityXCache, VelocityInputX, VelocityXPlus);
+		SAMPLE_LEFT_X(VelocityXCache, VelocityInputX, VelocityXMinus);
+	
+		// Compute Y
+		SAMPLE_RIGHT_Y(VelocityYCache, VelocityInputY, VelocityYPlus);
+		SAMPLE_LEFT_Y(VelocityYCache, VelocityInputY, VelocityYMinus);
+	
+		// Compute Z
+		SAMPLE_RIGHT_Z(VelocityZCache, VelocityInputZ, VelocityZPlus);
+		SAMPLE_LEFT_Z(VelocityZCache, VelocityInputZ, VelocityZMinus);
+	}
+	
+	float Div = (VelocityXPlus - VelocityXMinus + VelocityYPlus - VelocityYMinus + VelocityZPlus - VelocityZMinus) / (2.0f * Height);
+	DivergenceOutput[DispatchThreadId.xyz] = Div;
+}
+#endif
+
+
+#if COMPUTE_PRESSURE_CS == 1
+int IterationIndex;
+float Relaxation;
+float WorldSize;
+float DeltaTime;
+int3 VolumeSizeMinusOne;
+Texture3D<float> DivergenceInput;
+Texture3D<float> PressureInput;
+RWTexture3D<float> PressureOutput;
+
+
+groupshared float PressureCache[THREAD_SIZE*THREAD_SIZE*THREAD_SIZE];
+
+[numthreads(THREAD_SIZE, THREAD_SIZE, THREAD_SIZE)]
+void ComputePressure(uint3 DispatchThreadId : SV_DispatchThreadID, int3 GroupThreadID : SV_GroupThreadID)
+{
+	int GroupIndex =  ComputeGroupIndex(GroupThreadID);
+	PressureCache[GroupIndex] = PressureInput[DispatchThreadId.xyz].r;
+	GroupMemoryBarrierWithGroupSync();
+
+	// Compute Jacobi Factor
+	int SliceParity = (DispatchThreadId.z + IterationIndex) % 2;
+	int RowParity   = (DispatchThreadId.y + SliceParity+1) % 2;
+	int CellParity  = (DispatchThreadId.x + RowParity ) % 2;
+	
+	// add 1 since we want to expose a 0-1 parameter
+	float Weight = CellParity * min(1.93, Relaxation + 1);
+	
+	float PressureXMinus = 0.f; 
+	float PressureXPlus  = 0.f; 
+	float PressureYMinus = 0.f; 
+	float PressureYPlus  = 0.f; 
+	float PressureZMinus = 0.f; 
+	float PressureZPlus  = 0.f; 
+
+	{
+		// Compute X
+		SAMPLE_LEFT_X(PressureCache, PressureInput, PressureXMinus);
+		SAMPLE_RIGHT_X(PressureCache, PressureInput, PressureXPlus);
+	
+		// Compute Y
+		SAMPLE_LEFT_Y(PressureCache, PressureInput, PressureYMinus);
+		SAMPLE_RIGHT_Y(PressureCache, PressureInput, PressureYPlus);
+	
+		// Compute Z
+		SAMPLE_LEFT_Z(PressureCache, PressureInput, PressureZMinus);
+		SAMPLE_RIGHT_Z(PressureCache, PressureInput, PressureZPlus);
+	}
+
+	PressureOutput[DispatchThreadId.xyz]  = (PressureXPlus + PressureXMinus + PressureYPlus + PressureYMinus + PressureZPlus + PressureZMinus - DivergenceInput[DispatchThreadId.xyz]) / 6.f;
+	// PressureOutput[DispatchThreadId.xyz] = (1.f - Weight) * PressureCache[GroupIndex] + Weight * JacobiPressure;
+}
+#endif
+
+#if COMPUTE_RECTIFY_VELOCITY_CS == 1
+float WorldSize;
+int3 VolumeSizeMinusOne;
+Texture3D<float> VelocityInputX;
+Texture3D<float> VelocityInputY;
+Texture3D<float> VelocityInputZ;
+Texture3D<float> PressureInput;
+RWTexture3D<float> VelocityOutputX;
+RWTexture3D<float> VelocityOutputY;
+RWTexture3D<float> VelocityOutputZ;
+
+groupshared float PressureCache[THREAD_SIZE*THREAD_SIZE*THREAD_SIZE];
+
+[numthreads(THREAD_SIZE, THREAD_SIZE, THREAD_SIZE)]
+void RectifyVelocity(uint3 DispatchThreadId : SV_DispatchThreadID, int3 GroupThreadID : SV_GroupThreadID)
+{
+	int GroupIndex =  ComputeGroupIndex(GroupThreadID);
+	PressureCache[GroupIndex] = PressureInput[DispatchThreadId.xyz].r;
+	GroupMemoryBarrierWithGroupSync();
+	
+	// Sample Pressure
+	float PressureXMinus = 0.f;
+	float PressureXPlus  = 0.f;
+	float PressureYMinus = 0.f;
+	float PressureYPlus  = 0.f;
+	float PressureZMinus = 0.f;
+	float PressureZPlus  = 0.f;
+	
+	{
+		// Compute X
+		SAMPLE_LEFT_X(PressureCache, PressureInput, PressureXMinus);
+		SAMPLE_RIGHT_X(PressureCache, PressureInput, PressureXPlus);
+	
+		// Compute Y
+		SAMPLE_LEFT_Y(PressureCache, PressureInput, PressureYMinus);
+		SAMPLE_RIGHT_Y(PressureCache, PressureInput, PressureYPlus);
+	
+		// Compute Z
+		SAMPLE_LEFT_Z(PressureCache, PressureInput, PressureZMinus);
+		SAMPLE_RIGHT_Z(PressureCache, PressureInput, PressureZPlus);
+	}
+
+	float VelocityX = VelocityInputX[DispatchThreadId.xyz].r;
+	float VelocityY = VelocityInputY[DispatchThreadId.xyz].r;
+	float VelocityZ = VelocityInputZ[DispatchThreadId.xyz].r;
+
+	VelocityX -= ((PressureXPlus - PressureXMinus) / (WorldSize * 2.f));
+	VelocityY -= ((PressureYPlus - PressureYMinus) / (WorldSize * 2.f));
+	VelocityZ -= ((PressureZPlus - PressureZMinus) / (WorldSize * 2.f));
+
+	VelocityOutputX[DispatchThreadId.xyz] = VelocityX;
+	VelocityOutputY[DispatchThreadId.xyz] = VelocityY;
+	VelocityOutputZ[DispatchThreadId.xyz] = VelocityZ;
+	
+}
+
+
+#endif

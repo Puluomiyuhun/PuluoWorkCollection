@@ -3,15 +3,14 @@ Binaries/
 DerivedDataCache/
 Intermediate/
 Saved/
-Build/
-
-# Visual Studio files
+# IDE-generated project files and local settings
 .vs/
+.idea/
+*.sln
+*.slnx
 *.sln.DotSettings.user
-
+*.VC.db
+*.VC.opendb
 # OS files
 Thumbs.db
 .DS_Store
-
-# New folder (temp)
-新建文件夹/

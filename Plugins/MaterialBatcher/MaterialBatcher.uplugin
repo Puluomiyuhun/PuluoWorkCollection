@@ -1,0 +1,23 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Material Batcher",
+	"Description": "选中一个 StaticMesh 物体，将其共享同一母材质的多个材质实例合批为一个材质实例，并把各材质的贴图拼合到图集贴图，同时重映射 UV 保持渲染效果不变。",
+	"Category": "Rendering",
+	"CreatedBy": "",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "MaterialBatcher",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}

@@ -1,0 +1,326 @@
+#include "/Engine/Public/Platform.ush"
+#include "FluidWindInclude.ush"
+
+float WorldSize;
+float3 VolumePosPivot;
+
+// ---- wind sources ----
+uint SourceBufferCount;
+StructuredBuffer<FWindSourceShaderData> WindSourceBuffer;
+
+// ---- Output ----
+Texture3D<float> WindBufferInputX;
+Texture3D<float> WindBufferInputY;
+Texture3D<float> WindBufferInputZ;
+RWTexture3D<float> WindBufferOutputX;
+RWTexture3D<float> WindBufferOutputY;
+RWTexture3D<float> WindBufferOutputZ;
+
+void ApplyDirectionWind(float3 CellPosWS, FWindSourceShaderData Source, inout float3 VelocityWS);
+void ApplyOmniDirectionalWind(float3 CellPosWS, FWindSourceShaderData Source, inout float3 VelocityWS);
+void ApplyVortexWind(float3 CellPosWS, FWindSourceShaderData Source, inout float3 VelocityWS);
+void ApplyMovingWind(float3 CellPosWS, FWindSourceShaderData Source, inout float3 VelocityWS);
+
+#define THREAD_SIZE 4
+[numthreads(THREAD_SIZE,THREAD_SIZE,THREAD_SIZE)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	float3 CellPosWS = ((float3(DispatchThreadId.xyz) + float3(0.5f, 0.5f, 0.5f)) * WorldSize) + VolumePosPivot;
+
+	float3 VelocityWS = 0.f;
+	VelocityWS.x = WindBufferInputX[DispatchThreadId.xyz].r;
+	VelocityWS.y = WindBufferInputY[DispatchThreadId.xyz].r;
+	VelocityWS.z = WindBufferInputZ[DispatchThreadId.xyz].r;
+	
+	// Apply wind sources
+	for (uint i = 0; i < SourceBufferCount; i++)
+	{
+		switch (WindSourceBuffer[i].InfoType)
+		{
+		case 0: // Directional
+			{
+				ApplyDirectionWind(CellPosWS, WindSourceBuffer[i], VelocityWS);
+				break;
+			}
+		case 1: // OmniDirectional
+			{
+				ApplyOmniDirectionalWind(CellPosWS, WindSourceBuffer[i], VelocityWS);
+				break;
+			}
+		case 2: // Vortex
+			{
+				ApplyVortexWind(CellPosWS, WindSourceBuffer[i], VelocityWS);
+				break;
+			}
+		case 3: // Moving
+			{
+				ApplyMovingWind(CellPosWS, WindSourceBuffer[i], VelocityWS);
+				break;
+			}
+		default:
+			break;
+		}
+	}
+
+	
+	WindBufferOutputX[DispatchThreadId.xyz] = VelocityWS.x;
+	WindBufferOutputY[DispatchThreadId.xyz] = VelocityWS.y;
+	WindBufferOutputZ[DispatchThreadId.xyz] = VelocityWS.z;
+}
+
+void ApplyDirectionWind(float3 CellPosWS, FWindSourceShaderData Source, inout float3 VelocityWS)
+{
+	float3 Force = Source.Behavior.xyz;
+
+	switch (Source.Shape)
+	{
+	case 0: // Box
+		{
+			float3 DifferenceWS = CellPosWS - Source.Position.xyz;
+			float3x3 InvRot = (float3x3)Source.RotationMatrix;
+			float3 LocalDiff = mul(InvRot, DifferenceWS);
+			if (all(abs(LocalDiff) <= Source.Extents.xyz))
+			{
+				VelocityWS += Force;
+			}
+			break;
+		}
+	case 1: // Sphere
+		{
+			float DisSq = DistanceSq(CellPosWS, Source.Position);
+			if (DisSq <= Source.Extents.y) // Extents.y ~ RadiusSquare
+			{
+				VelocityWS += Force;
+			}
+			break;
+		}
+	case 2: // Capsule
+		{
+			float3x3 InvRot = (float3x3)Source.RotationMatrix;
+			float3 CapsuleAxisWS = InvRot[2];
+			float3 CapsuleHalf = Source.Extents.y * 0.5f * CapsuleAxisWS;
+			float3 CapsuleStart = Source.Position.xyz - CapsuleHalf;
+			float3 CapsuleEnd = Source.Position.xyz + CapsuleHalf;
+
+			float3 StartToCell = CellPosWS - CapsuleStart;
+			float3 StartToEnd = CapsuleEnd - CapsuleStart;
+			float StartToEndLenSq = LengthSq(StartToEnd);
+			float t = clamp(dot(StartToCell, StartToEnd) / StartToEndLenSq, 0.f, 1.f);
+			float3 ClosestPoint = CapsuleStart + t * StartToEnd;
+
+			float DisSq = DistanceSq(CellPosWS, ClosestPoint);
+			if (DisSq <= Source.Extents.z) // Extents.z ~ RadiusSquare
+			{
+				VelocityWS += Force;
+			}
+			break;
+		}
+	default:
+		break;
+	}
+}
+
+void ApplyOmniDirectionalWind(float3 CellPosWS, FWindSourceShaderData Source, inout float3 VelocityWS)
+{
+	float Force = Source.Behavior.x;
+
+	switch (Source.Shape)
+	{
+	case 0: // Box
+		{
+			float3 DifferenceWS = CellPosWS - Source.Position.xyz;
+			float3x3 InvRot = (float3x3)Source.RotationMatrix;
+			float3 LocalDiff = mul(InvRot, DifferenceWS);
+			if (all(abs(LocalDiff) <= Source.Extents.xyz))
+			{
+				float DirLen = length(DifferenceWS);
+				if (DirLen > 0.001f)
+				{
+					VelocityWS += Force * (DifferenceWS / DirLen);
+				}
+			}
+			break;
+		}
+	case 1: // Sphere
+		{
+			float3 DifferenceWS = CellPosWS - Source.Position;
+			float DisSq = LengthSq(DifferenceWS);
+			if (DisSq <= Source.Extents.x * Source.Extents.x && DisSq > 0.001f)
+			{
+				VelocityWS += Force * rsqrt(DisSq) * DifferenceWS;
+			}
+			break;
+		}
+	case 2: // Capsule
+		{
+			float3x3 InvRot = (float3x3)Source.RotationMatrix;
+			float3 CapsuleAxisWS = InvRot[2];
+			float3 CapsuleHalf = Source.Extents.y * 0.5f * CapsuleAxisWS;
+			float3 CapsuleStart = Source.Position.xyz - CapsuleHalf;
+			float3 CapsuleEnd = Source.Position.xyz + CapsuleHalf;
+
+			float3 StartToCell = CellPosWS - CapsuleStart;
+			float3 StartToEnd = CapsuleEnd - CapsuleStart;
+			float StartToEndLenSq = LengthSq(StartToEnd);
+			float t = clamp(dot(StartToCell, StartToEnd) / StartToEndLenSq, 0.f, 1.f);
+			float3 ClosestPoint = CapsuleStart + t * StartToEnd;
+
+			float3 DifferenceWS = CellPosWS - ClosestPoint;
+			float DisSq = DistanceSq(CellPosWS, ClosestPoint);
+			if (DisSq <= Source.Extents.x * Source.Extents.x && DisSq > 0.001f)
+			{
+				VelocityWS += Force * rsqrt(DisSq) * DifferenceWS;
+			}
+			break;
+		}
+	}
+
+}
+
+void ApplyVortexWind(float3 CellPosWS, FWindSourceShaderData Source, inout float3 VelocityWS)
+{
+	float3 Axis = Source.Behavior.xyz;
+	float Force = Source.Behavior.w;
+
+	switch (Source.Shape)
+	{
+	case 0: // Box
+		{
+			float3 DifferenceWS = CellPosWS - Source.Position.xyz;
+			float3x3 InvRot = (float3x3)Source.RotationMatrix;
+			float3 LocalDiff = mul(InvRot, DifferenceWS);
+			if (all(abs(LocalDiff) <= Source.Extents.xyz))
+			{
+				float DirLen = length(DifferenceWS);
+				if (DirLen > 0.001f)
+				{
+					VelocityWS += Force * cross(Axis, DifferenceWS / DirLen);
+				}
+			}
+			break;
+		}
+	case 1: // Sphere
+		{
+			float3 DifferenceWS = CellPosWS - Source.Position;
+			float DisSq = LengthSq(DifferenceWS);
+			if (DisSq <= Source.Extents.y && DisSq > 0.001f) // Extents.y ~ RadiusSquare
+			{
+				VelocityWS += Force * cross(Axis, rsqrt(DisSq) * DifferenceWS);
+			}
+			break;
+		}
+	case 2: // Capsule
+		{
+			float3x3 InvRot = (float3x3)Source.RotationMatrix;
+			float3 CapsuleAxisWS = InvRot[2];
+			float3 CapsuleHalf = Source.Extents.y * 0.5f * CapsuleAxisWS;
+			float3 CapsuleStart = Source.Position.xyz - CapsuleHalf;
+			float3 CapsuleEnd = Source.Position.xyz + CapsuleHalf;
+
+			float3 StartToCell = CellPosWS - CapsuleStart;
+			float3 StartToEnd = CapsuleEnd - CapsuleStart;
+			float StartToEndLenSq = LengthSq(StartToEnd);
+			float t = clamp(dot(StartToCell, StartToEnd) / StartToEndLenSq, 0.f, 1.f);
+			float3 ClosestPoint = CapsuleStart + t * StartToEnd;
+
+			float3 DifferenceWS = CellPosWS - ClosestPoint;
+			float DisSq = DistanceSq(CellPosWS, ClosestPoint);
+			if (DisSq <= Source.Extents.x * Source.Extents.x && DisSq > 0.001f)
+			{
+				VelocityWS += Force * cross(Axis, rsqrt(DisSq) * DifferenceWS);
+			}
+			break;
+		}
+		default:
+			break;
+	}
+}
+
+void ApplyMovingWind(float3 CellPosWS, FWindSourceShaderData Source, inout float3 VelocityWS)
+{
+	float Force = Source.Behavior.w;
+	float DeltaTime = Source.AngleSpeed.w;
+	// Behavior.xyz = backward sweep vector (CurrentPos → LastPos), used for sweep path
+	float3 SweepVector = Source.Behavior.xyz;
+	// Source.Position = current position (sweep origin)
+	float3 CurrentLocation = Source.Position.xyz;
+	float3 AngleSpeed = Source.AngleSpeed.xyz;
+	
+	float SweepLen = length(SweepVector);
+	float AngleSpeedLen = length(AngleSpeed);
+	if (SweepLen <= 0.1f && AngleSpeedLen < 0.1f)
+	{
+		return ;
+	}
+
+	// Actual forward movement direction = -SweepVector (negated backward vector)
+	float3 MovingDir = SweepLen > 0.001f ? (-SweepVector / SweepLen) : float3(0, 0, 0);
+	
+	// the Sweep line [CurrentLocation, CurrentLocation + SweepVector] = [CurrentLocation, LastLocation]
+	// project cell position to the sweep line and find the closest point on the line segment to the cell.
+	float3 OriginToCell = CellPosWS - CurrentLocation;
+	float3 SweepDir = SweepLen > 0.001f ? (SweepVector / SweepLen) : float3(0, 0, 0);
+	float t = SweepLen > 0.001f ? clamp(dot(OriginToCell, SweepDir) / SweepLen, 0.f, 1.f) : 0.f;
+	float3 ClosestSweepPos = CurrentLocation + t * SweepVector;
+	
+	float3 DifferenceWS = CellPosWS - ClosestSweepPos;
+	float3x3 InvRot = (float3x3)Source.RotationMatrix;
+	
+	bool bInside = false;
+	
+	switch (Source.Shape)
+	{
+	case 0: // Box
+		{
+			// Project difference of world space to local space.
+			float3 LocalDiff = mul(InvRot, DifferenceWS);
+			if (all(abs(LocalDiff) <= Source.Extents.xyz))
+			{
+				bInside = true;
+			}
+			break;
+		}
+	case 1: // Sphere
+		{
+			float DisSq = LengthSq(DifferenceWS);
+			if (DisSq <= Source.Extents.x * Source.Extents.x)
+			{
+				bInside = true;
+			}
+			break;
+		}
+	case 2: // Capsule
+		{
+			float3 CapsuleAxisWS = InvRot[2];
+			
+			float CapsuleHalfLen = Source.Extents.y * 0.5f;
+			float3 CapsuleStart = ClosestSweepPos - CapsuleAxisWS * CapsuleHalfLen;
+			float3 CapsuleEnd = ClosestSweepPos + CapsuleAxisWS * CapsuleHalfLen;
+			
+			float3 StartToCell = CellPosWS - CapsuleStart;
+			float3 StartToEnd = CapsuleEnd - CapsuleStart;
+			float StartToEndLenSq = LengthSq(StartToEnd);
+	
+			float u = StartToEndLenSq > 0.001f ? clamp(dot(StartToCell, StartToEnd) / StartToEndLenSq, 0.f, 1.f) : 0.f;
+			float3 ClosestOnAxis = CapsuleStart + u * StartToEnd;
+			
+			float DisSq = DistanceSq(CellPosWS, ClosestOnAxis);
+			if (DisSq <= Source.Extents.x * Source.Extents.x)
+			{
+				bInside = true;
+			}
+			break;
+		}
+		default:
+			break;
+	}
+
+	if (bInside)
+	{
+		float DisSq = LengthSq(DifferenceWS);
+		float3 RadialDir = DisSq > 0.001f ? (rsqrt(DisSq) * DifferenceWS) : float3(0, 0, 0);
+		float3 BlowDirection = normalize(RadialDir + MovingDir);
+		VelocityWS += BlowDirection * Force;
+
+	}
+}

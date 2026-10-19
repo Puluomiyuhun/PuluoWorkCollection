@@ -1,0 +1,22 @@
+#include "/Engine/Public/Platform.ush"
+#include "FluidWindInclude.ush"
+
+
+Texture3D<float> WindBufferInputX;
+Texture3D<float> WindBufferInputY;
+Texture3D<float> WindBufferInputZ;
+RWTexture3D<float3> WindBufferOutput;
+
+#define THREAD_SIZE 4
+
+[numthreads(THREAD_SIZE,THREAD_SIZE,THREAD_SIZE)]
+void MainCS (int3 DispatchThreadID : SV_DispatchThreadID)
+{
+	float VelocityX = WindBufferInputX[DispatchThreadID.xyz].r;
+	float VelocityY = WindBufferInputY[DispatchThreadID.xyz].r;
+	float VelocityZ = WindBufferInputZ[DispatchThreadID.xyz].r;
+	float3 OutputColor = float3(VelocityX,VelocityY,VelocityZ);
+	OutputColor = clamp(OutputColor, -50, 50);
+	WindBufferOutput[DispatchThreadID.xyz] = OutputColor;
+	
+}

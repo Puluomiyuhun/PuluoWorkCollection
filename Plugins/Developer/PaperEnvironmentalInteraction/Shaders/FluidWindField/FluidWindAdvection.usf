@@ -1,0 +1,71 @@
+#include "/Engine/Public/Platform.ush"
+#include "FluidWindInclude.ush"
+
+float DeltaTime;
+float WorldSize;
+Texture3D<float> WindBufferInputX;
+Texture3D<float> WindBufferInputY;
+Texture3D<float> WindBufferInputZ;
+Texture3D<float> WindBufferTarget;
+RWTexture3D<float> WindBufferOutput;
+
+int3 VolumeSizeMinusOne;
+float AdvectionForce;
+
+#define THREAD_SIZE 4
+
+#if ADVECTION_MODE == 0
+
+// Semi-Lagrangian Advection
+[numthreads(THREAD_SIZE,THREAD_SIZE,THREAD_SIZE)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID, int3 GroupThreadID : SV_GroupThreadID, int3 GroupID: SV_GroupID)
+{
+	float3 WindDataVelocity = float3(
+		WindBufferInputX[DispatchThreadId.xyz].r,
+		WindBufferInputY[DispatchThreadId.xyz].r,
+		WindBufferInputZ[DispatchThreadId.xyz].r
+	);
+	float3 AdvectionData = (WindDataVelocity * AdvectionForce * DeltaTime);
+	
+	// Back-trace position in continuous grid coordinates
+	float3 BackTracePos = float3(DispatchThreadId) - AdvectionData / WorldSize;
+	float3 BackTracePosFloored = floor(BackTracePos);
+	// Fractional part for trilinear interpolation weights (always in [0, 1) due to floor)
+	float3 Frac = BackTracePos - BackTracePosFloored;
+
+	float xd = Frac.x;
+	float yd = Frac.y;
+	float zd = Frac.z;
+	
+	int x0 = clamp((int)BackTracePosFloored.x,     0, VolumeSizeMinusOne.x);
+	int y0 = clamp((int)BackTracePosFloored.y,     0, VolumeSizeMinusOne.y);
+	int z0 = clamp((int)BackTracePosFloored.z,     0, VolumeSizeMinusOne.z);
+	int x1 = clamp((int)BackTracePosFloored.x + 1, 0, VolumeSizeMinusOne.x);
+	int y1 = clamp((int)BackTracePosFloored.y + 1, 0, VolumeSizeMinusOne.y);
+	int z1 = clamp((int)BackTracePosFloored.z + 1, 0, VolumeSizeMinusOne.z);
+	
+	float Velocity000 = WindBufferTarget[int3(x0, y0, z0)].r;
+	float Velocity100 = WindBufferTarget[int3(x1, y0, z0)].r;
+	float Velocity010 = WindBufferTarget[int3(x0, y1, z0)].r;
+	float Velocity110 = WindBufferTarget[int3(x1, y1, z0)].r;
+	float Velocity001 = WindBufferTarget[int3(x0, y0, z1)].r;
+	float Velocity101 = WindBufferTarget[int3(x1, y0, z1)].r;
+	float Velocity011 = WindBufferTarget[int3(x0, y1, z1)].r;
+	float Velocity111 = WindBufferTarget[int3(x1, y1, z1)].r;
+
+	float AdvectVelocity =
+		Velocity000 * (1 - xd) * (1 - yd) * (1 - zd) +
+		Velocity100 * xd * (1 - yd) * (1 - zd) +
+		Velocity010 * (1 - xd) * yd * (1 - zd) +
+		Velocity110 * xd * yd * (1 - zd) +
+		Velocity001 * (1 - xd) * (1 - yd) * zd +
+		Velocity101 * xd * (1 - yd) * zd +
+		Velocity011 * (1 - xd) * yd * zd +
+		Velocity111 * xd * yd * zd;
+	
+	WindBufferOutput[DispatchThreadId.xyz] =  AdvectVelocity;
+}
+
+#endif
+
+

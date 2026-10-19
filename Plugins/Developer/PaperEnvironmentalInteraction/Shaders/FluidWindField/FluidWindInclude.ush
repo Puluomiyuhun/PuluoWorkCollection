@@ -1,0 +1,62 @@
+#pragma once
+
+#include "/Engine/Public/Platform.ush"
+
+struct FWindSourceShaderData
+{
+	int InfoType;
+	int Shape;
+	int Padding0;
+	int Padding1;
+	
+	// Position
+	// Directional / Omni / Vortex - (PosX, PosY, PosZ, N/A)
+	// Moving - (PosX, PosY, PosZ, N/A) 
+	float4 Position;
+
+	// Wind Source Shape
+	// 0-Box: (ExtentX, ExtentY, ExtentZ, N/A)
+	// 1-Sphere: (Radius, Radius * Radius, N/A, N/A)
+	// 2-Capsule: (Radius, Length, Radius * Radius, N/A)
+	float4 Extents;
+
+	// Wind Source Strength / Direction / Axis-Force
+	// 1.Directional- (V3Force.x, V3Force.y, V3Force.z, N/A)
+	// 2.Omni - (Force, N/A, N/A, N/A)
+	// 3.Vortex - (Axis.x, Axis.y, Axis.z, Force)
+	// 4.Moving - (-V3MovingDir.x, -V3MovingDir.y, -V3MovingDir.z, ScaledForce) 
+	float4 Behavior;
+
+	// Only for Moving Wind Source, represents the angle speed of the moving direction in degree per second. (AngleX, AngleY, AngleZ, N/A)
+	// Directional / Omni / Vortex - (N/A, N/A, N/A, N/A)
+	// Moving - (AngleX, AngleY, AngleZ, DeltaTime in Game thread)
+	float4 AngleSpeed;
+
+	// Inverse rotation matrix (world -> local), pre-computed on CPU
+	float4x4 RotationMatrix;
+};
+
+void ComputeUVW(inout uint3 Coord)
+{
+	uint SwapVal = Coord.z;
+	Coord.z = Coord.y;
+	Coord.y = SwapVal;
+}
+
+void AtomicAdd(uniform RWTexture3D<int> RWTexture, uint3 RWTextureSize, in uint3 Coord, in float Value)
+{
+	if (all(Coord < RWTextureSize))
+	{
+		InterlockedAdd(RWTexture[Coord], (int)(Value * FXDPT_SIZE));
+	}
+}
+
+float LengthSq(float3 Value)
+{
+	return dot(Value, Value);
+}
+
+float DistanceSq(float3 Pos1, float3 Pos2)
+{
+	return LengthSq(Pos1 - Pos2);
+}
